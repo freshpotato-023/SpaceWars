@@ -1,0 +1,1969 @@
+from kivy.app import App
+from kivy.clock import Clock
+from kivy.core.window import Window
+from kivy.graphics import Color, Rectangle, Ellipse, Line, Triangle, PushMatrix, PopMatrix, Translate, Scale
+from kivy.uix.widget import Widget
+from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.uix.floatlayout import FloatLayout
+from kivy.core.audio import SoundLoader
+from kivy.utils import get_color_from_hex
+from kivy.core.text import Label as CoreLabel
+
+# Game constants
+SCREEN_WIDTH = 900
+SCREEN_HEIGHT = 700
+FPS = 60
+PIXEL_SIZE = 4
+POWERUP_DROP_CHANCE = 0.70
+
+# Color constants
+WHITE = (1, 1, 1, 1)
+BLACK = (0, 0, 0, 1)
+RED = (1, 0.2, 0.2, 1)
+GREEN = (0.2, 1, 0.2, 1)
+BLUE = (0.2, 0.4, 1, 1)
+YELLOW = (1, 1, 0.2, 1)
+PURPLE = (0.8, 0.2, 1, 1)
+ORANGE = (1, 0.5, 0, 1)
+CYAN = (0.2, 1, 1, 1)
+
+
+class SimpleRandom:
+    """Simple random number generator"""
+    _seed = 12345
+
+    @classmethod
+    def random(cls):
+        cls._seed = (cls._seed * 9301 + 49297) % 233280
+        return cls._seed / 233280
+
+    @classmethod
+    def randint(cls, a, b):
+        return int(a + (cls.random() * (b - a + 1)))
+
+    @classmethod
+    def choice(cls, seq):
+        return seq[cls.randint(0, len(seq) - 1)] if seq else None
+
+
+class StarField:
+    """Manages background stars"""
+
+    def __init__(self):
+        self.stars = []
+        for _ in range(150):
+            self.stars.append({
+                'x': SimpleRandom.randint(0, SCREEN_WIDTH),
+                'y': SimpleRandom.randint(0, SCREEN_HEIGHT),
+                'size': SimpleRandom.randint(1, 3),
+                'speed': SimpleRandom.random() * 3 + 1
+            })
+
+    def update(self):
+        for star in self.stars:
+            star['y'] -= star['speed']
+            if star['y'] < 0:
+                star['y'] = SCREEN_HEIGHT
+                star['x'] = SimpleRandom.randint(0, SCREEN_WIDTH)
+
+    def draw(self, canvas):
+        with canvas:
+            Color(1, 1, 1, 1)
+            for star in self.stars:
+                px = int(star['x'] // PIXEL_SIZE) * PIXEL_SIZE
+                py = int(star['y'] // PIXEL_SIZE) * PIXEL_SIZE
+                size = max(PIXEL_SIZE, int(star['size']) * PIXEL_SIZE)
+                Rectangle(pos=(px, py), size=(size, size))
+
+
+class Particle:
+    """Particle effect for explosions"""
+
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        self.vx = SimpleRandom.random() * 6 - 3
+        self.vy = SimpleRandom.random() * 6 - 3
+        self.life = 1.0
+        self.color = color
+        self.size = SimpleRandom.randint(2, 5)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= 0.02
+        return self.life > 0
+
+    def draw(self, canvas):
+        with canvas:
+            Color(self.color[0], self.color[1], self.color[2], self.life)
+            size = max(PIXEL_SIZE, int(self.size) * PIXEL_SIZE)
+            px = int((self.x - size / 2) // PIXEL_SIZE) * PIXEL_SIZE
+            py = int((self.y - size / 2) // PIXEL_SIZE) * PIXEL_SIZE
+            Rectangle(pos=(px, py), size=(size, size))
+
+
+class SpaceShooterGame(Widget):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.size = (SCREEN_WIDTH, SCREEN_HEIGHT)
+        Window.size = (SCREEN_WIDTH, SCREEN_HEIGHT)
+        Window.resizable = True
+        Window.bind(size=self._on_window_resize)
+
+        # Game state
+        self.game_state = "menu"  # menu, playing, game_over, victory
+        self.score = 0
+        self.wave = 1
+        self.enemies_killed = 0
+
+        # Player
+        self.player = {
+            'x': SCREEN_WIDTH // 2,
+            'y': 100,
+            'width': 30,
+            'height': 30,
+            'lives': 3,
+            'invulnerable': False,
+            'invulnerable_timer': 0,
+            'speed': 6,
+            'weapon_level': 1
+        }
+
+        # Game objects
+        self.enemies = []
+        self.bullets = []
+        self.enemy_bullets = []
+        self.powerups = []
+        self.particles = []
+        self.starfield = StarField()
+
+        # Power-up timers
+        self.shield_active = False
+        self.shield_timer = 0
+        self.rapid_fire = False
+        self.rapid_timer = 0
+        self.shot_timer = 0
+        self.shoot_delay = 0.25
+
+        # Stage system
+        self.max_stages = 10
+        self.stage_phase = "enemies"  # enemies, boss, clear_anim
+        self.stage_enemy_target = 12
+        self.stage_enemy_kills = 0
+        self.spawn_timer = 0
+        self.clear_banner_timer = 0
+        self.arrival_timer = 0
+        self.arrival_text = ""
+        self.clear_message = "LEVEL Cleared"
+        self.player_departing = False
+        self.ultra_boss_active = False
+        self.pending_ultra_spawn = False
+        self.current_profile = {}
+
+        # Deterministic background deco layers for stage themes.
+        self.bg_meteor_chunks = []
+        self.bg_saturn_stars = []
+        for _ in range(30):
+            self.bg_meteor_chunks.append({
+                'x': SimpleRandom.randint(0, SCREEN_WIDTH),
+                'y': SimpleRandom.randint(0, SCREEN_HEIGHT),
+                'size': SimpleRandom.randint(8, 24),
+            })
+        for _ in range(80):
+            self.bg_saturn_stars.append({
+                'x': SimpleRandom.randint(0, SCREEN_WIDTH),
+                'y': SimpleRandom.randint(0, SCREEN_HEIGHT),
+                'size': SimpleRandom.randint(1, 3),
+            })
+
+        # UI Elements
+        self.create_ui()
+
+        # Keyboard
+        self.setup_keyboard()
+
+        # Audio
+        self.sounds = {}
+        self.bgm = None
+        self.boss_bgm = None
+        self.current_music = None
+        self.load_audio()
+
+        # Start game loop
+        Clock.schedule_interval(self.update, 1.0 / FPS)
+
+    def _on_window_resize(self, _window, size):
+        self.size = size
+
+    def create_ui(self):
+        """Create UI elements"""
+        layout = FloatLayout(size=self.size)
+
+        # Left-side HUD
+        self.health_label = Label(
+            text=f"Health: {self.player['lives']}",
+            color=(1, 0.3, 0.3, 1),
+            pos=(20, SCREEN_HEIGHT - 50),
+            size_hint=(None, None),
+            size=(220, 30),
+            halign='left',
+            text_size=(220, None),
+            font_size='22sp'
+        )
+
+        self.level_label = Label(
+            text=f"Level: {self.wave}",
+            color=(1, 1, 1, 1),
+            pos=(20, SCREEN_HEIGHT - 85),
+            size_hint=(None, None),
+            size=(220, 30),
+            halign='left',
+            text_size=(220, None),
+            font_size='20sp'
+        )
+
+        self.kills_label = Label(
+            text=f"Kills: {self.enemies_killed}",
+            color=(0.7, 1, 0.7, 1),
+            pos=(20, SCREEN_HEIGHT - 120),
+            size_hint=(None, None),
+            size=(220, 30),
+            halign='left',
+            text_size=(220, None),
+            font_size='20sp'
+        )
+
+        self.score_label = Label(
+            text="Score: 0",
+            color=(1, 1, 1, 1),
+            pos=(20, SCREEN_HEIGHT - 155),
+            size_hint=(None, None),
+            size=(220, 30),
+            halign='left',
+            text_size=(220, None),
+            font_size='18sp'
+        )
+
+        # HUD is rendered directly on the canvas for consistent pixel-art scaling.
+
+    def setup_keyboard(self):
+        """Setup keyboard handling"""
+        self._keyboard = Window.request_keyboard(self._keyboard_closed, self)
+        self._keyboard.bind(on_key_down=self._on_key_down)
+        self._keyboard.bind(on_key_up=self._on_key_up)
+        self.keys_pressed = set()
+
+    def _keyboard_closed(self):
+        self._keyboard.unbind(on_key_down=self._on_key_down)
+        self._keyboard.unbind(on_key_up=self._on_key_up)
+        self._keyboard = None
+
+    def _on_key_down(self, keyboard, keycode, text, modifiers):
+        self.keys_pressed.add(keycode[1])
+
+        if self.game_state == "menu":
+            if keycode[1] == 'spacebar':
+                self.start_game()
+        elif self.game_state == "game_over":
+            if keycode[1] == 'r':
+                self.reset_game()
+            elif keycode[1] == 'q':
+                App.get_running_app().stop()
+        elif self.game_state == "victory":
+            if keycode[1] == 'r':
+                self.reset_game()
+
+    def _on_key_up(self, keyboard, keycode):
+        self.keys_pressed.discard(keycode[1])
+
+    def start_game(self):
+        """Start new game"""
+        self.game_state = "playing"
+        self.ultra_boss_active = False
+        self.pending_ultra_spawn = False
+        self.start_background_music()
+        self.setup_stage(1)
+
+    def reset_game(self):
+        """Reset game to initial state"""
+        self.game_state = "menu"
+        self.score = 0
+        self.wave = 1
+        self.enemies_killed = 0
+        self.player = {
+            'x': SCREEN_WIDTH // 2,
+            'y': 100,
+            'width': 30,
+            'height': 30,
+            'lives': 3,
+            'invulnerable': False,
+            'invulnerable_timer': 0,
+            'speed': 6,
+            'weapon_level': 1
+        }
+        self.enemies.clear()
+        self.bullets.clear()
+        self.enemy_bullets.clear()
+        self.powerups.clear()
+        self.particles.clear()
+        self.shield_active = False
+        self.rapid_fire = False
+        self.shot_timer = 0
+        self.stage_phase = "enemies"
+        self.stage_enemy_kills = 0
+        self.spawn_timer = 0
+        self.clear_banner_timer = 0
+        self.arrival_timer = 0
+        self.arrival_text = ""
+        self.clear_message = "LEVEL Cleared"
+        self.player_departing = False
+        self.ultra_boss_active = False
+        self.pending_ultra_spawn = False
+        self.start_background_music()
+        self.update_ui()
+
+    def get_stage_profile(self, stage):
+        """Return stage profile (theme, enemies, boss) for stages 1..10."""
+        profiles = {
+            1: {'theme': 'space', 'enemy_mode': 'alien', 'boss_kind': 'octopus', 'arrival': "Deep Space Sector"},
+            2: {'theme': 'kong', 'enemy_mode': 'meteor', 'boss_kind': 'grozilla', 'arrival': "Kong Universe"},
+            3: {'theme': 'saturn', 'enemy_mode': 'hybrid', 'boss_kind': 'growly', 'arrival': "Saturn"},
+            4: {'theme': 'nebula', 'enemy_mode': 'nebula', 'boss_kind': 'manta', 'arrival': "Nebula Rift"},
+            5: {'theme': 'ember', 'enemy_mode': 'ember', 'boss_kind': 'scorpion', 'arrival': "Ember Forge"},
+            6: {'theme': 'frost', 'enemy_mode': 'frost', 'boss_kind': 'wyvern', 'arrival': "Frozen Expanse"},
+            7: {'theme': 'toxic', 'enemy_mode': 'toxic', 'boss_kind': 'serpent', 'arrival': "Toxic Wasteland"},
+            8: {'theme': 'quantum', 'enemy_mode': 'quantum', 'boss_kind': 'warden', 'arrival': "Quantum Citadel"},
+            9: {'theme': 'void', 'enemy_mode': 'void', 'boss_kind': 'behemoth', 'arrival': "Void Abyss"},
+            10: {'theme': 'eclipse', 'enemy_mode': 'eclipse', 'boss_kind': 'overseer', 'arrival': "Eclipse Throne"},
+        }
+        profile = profiles.get(stage, profiles[10]).copy()
+        profile['stage'] = stage
+        return profile
+
+    def setup_stage(self, stage):
+        """Initialize a new stage."""
+        self.wave = stage
+        self.current_profile = self.get_stage_profile(stage)
+        self.stage_phase = "enemies"
+        self.stage_enemy_kills = 0
+        self.stage_enemy_target = 10 + (stage * 4)
+        self.spawn_timer = 0
+        self.clear_banner_timer = 0
+        self.arrival_timer = 0
+        self.arrival_text = ""
+        self.player_departing = False
+
+        self.enemies.clear()
+        self.enemy_bullets.clear()
+        self.powerups.clear()
+        self.shot_timer = 0
+        self.player['x'] = SCREEN_WIDTH // 2
+        self.player['y'] = 100
+        self.player['invulnerable'] = True
+        self.player['invulnerable_timer'] = 40
+
+        if stage == 1:
+            self.stage_phase = "enemies"
+        else:
+            self.stage_phase = "arrival"
+            self.arrival_timer = 2.8
+            self.arrival_text = f"Arrived at {self.current_profile.get('arrival', f'Stage {stage}')}"
+            self.player['y'] = -80
+
+        self.start_background_music()
+        self.update_ui()
+
+    def spawn_stage_enemy(self):
+        """Spawn one stage-themed regular enemy."""
+        if self.game_state != "playing":
+            return
+        if self.stage_phase != "enemies":
+            return
+
+        mode = self.current_profile.get('enemy_mode', 'alien')
+        variant_pool = ['basic', 'fast', 'tank']
+        variant = SimpleRandom.choice(variant_pool)
+
+        enemy = {
+            'x': SimpleRandom.randint(40, SCREEN_WIDTH - 40),
+            'y': SCREEN_HEIGHT + SimpleRandom.randint(10, 60),
+            'width': 30,
+            'height': 30,
+            'type': 'enemy',
+            'variant': variant,
+            'sprite_mode': mode,
+            'health': 1,
+            'speed': 2 + (self.wave * 0.15),
+            'points': 10 + (self.wave * 2),
+            'shoot_chance': 0.006,
+        }
+
+        if variant == 'fast':
+            enemy['width'] = 20
+            enemy['height'] = 20
+            enemy['speed'] += 1.8
+            enemy['points'] += 8
+            enemy['shoot_chance'] = 0.003
+        elif variant == 'tank':
+            enemy['width'] = 40
+            enemy['height'] = 40
+            enemy['health'] = 3 + (self.wave // 3)
+            enemy['speed'] = max(1.0, enemy['speed'] - 1.4)
+            enemy['points'] += 16
+            enemy['shoot_chance'] = 0.009
+
+        if mode == 'meteor':
+            enemy['speed'] += 1.1
+            enemy['drift'] = SimpleRandom.random() * 2.0 - 1.0
+            enemy['shoot_chance'] = 0.0
+        elif mode == 'hybrid':
+            enemy['drift'] = (SimpleRandom.random() * 1.8) - 0.9
+            enemy['shoot_chance'] = 0.008
+        elif mode in ['nebula', 'quantum']:
+            enemy['drift'] = (SimpleRandom.random() * 2.8) - 1.4
+            enemy['shoot_chance'] = 0.011
+            enemy['speed'] += 0.6
+        elif mode in ['ember', 'toxic', 'void']:
+            enemy['drift'] = (SimpleRandom.random() * 1.6) - 0.8
+            enemy['shoot_chance'] = 0.004
+            enemy['speed'] += 1.0
+        elif mode in ['frost', 'eclipse']:
+            enemy['drift'] = (SimpleRandom.random() * 1.0) - 0.5
+            enemy['shoot_chance'] = 0.009
+        else:
+            enemy['drift'] = (SimpleRandom.random() * 1.2) - 0.6
+
+        # Base color used by enemy palettes.
+        if mode == 'meteor':
+            enemy['color'] = ORANGE
+        elif mode == 'hybrid':
+            enemy['color'] = CYAN
+        elif mode == 'nebula':
+            enemy['color'] = PURPLE
+        elif mode == 'ember':
+            enemy['color'] = (1, 0.4, 0.15, 1)
+        elif mode == 'frost':
+            enemy['color'] = (0.65, 0.9, 1, 1)
+        elif mode == 'toxic':
+            enemy['color'] = (0.45, 1, 0.35, 1)
+        elif mode == 'quantum':
+            enemy['color'] = (0.6, 0.5, 1, 1)
+        elif mode == 'void':
+            enemy['color'] = (0.35, 0.35, 0.45, 1)
+        elif mode == 'eclipse':
+            enemy['color'] = (0.95, 0.78, 0.2, 1)
+        else:
+            enemy['color'] = RED if variant == 'basic' else (YELLOW if variant == 'fast' else PURPLE)
+
+        self.enemies.append(enemy)
+
+    def get_boss_size(self, boss_kind):
+        sizes = {
+            'octopus': (84, 96),
+            'grozilla': (96, 96),
+            'growly': (90, 92),
+            'manta': (96, 84),
+            'scorpion': (96, 92),
+            'wyvern': (98, 96),
+            'serpent': (92, 96),
+            'warden': (96, 98),
+            'behemoth': (110, 100),
+            'overseer': (108, 108),
+            'tyrant': (130, 128),
+        }
+        return sizes.get(boss_kind, (84, 96))
+
+    def spawn_stage_boss(self):
+        """Spawn stage boss and its minions."""
+        boss_kind = self.current_profile.get('boss_kind', 'octopus')
+        boss_w, boss_h = self.get_boss_size(boss_kind)
+        boss = {
+            'x': SCREEN_WIDTH // 2,
+            'y': SCREEN_HEIGHT - 120,
+            'type': 'boss',
+            'boss_kind': boss_kind,
+            'width': boss_w,
+            'height': boss_h,
+            'health': 80 + (self.wave * 18),
+            'max_health': 80 + (self.wave * 18),
+            'speed': 2.4 + (self.wave * 0.08),
+            'points': 700 + (self.wave * 40),
+            'attack_timer': 0,
+            'attack_mode': 0,
+            'spawn_immunity': 1.5,
+        }
+
+        self.enemies.append(boss)
+        self.start_boss_music()
+        self.stage_phase = "boss"
+
+        # Spawn minions alongside the boss.
+        for idx in range(4):
+            minion = {
+                'x': boss['x'] - 120 + (idx * 80),
+                'y': boss['y'] - 40 - (idx % 2) * 20,
+                'width': 22,
+                'height': 22,
+                'type': 'minion',
+                'variant': 'escort',
+                'sprite_mode': self.current_profile.get('enemy_mode', 'alien'),
+                'health': 1 + (self.wave // 4),
+                'speed': 2.2 + (self.wave * 0.08),
+                'points': 20 + (self.wave * 2),
+                'color': ORANGE if boss_kind == 'grozilla' else (GREEN if boss_kind == 'growly' else PURPLE),
+            }
+            self.enemies.append(minion)
+
+    def start_ultra_boss_encounter(self):
+        """Prepare Ultra encounter before spawning The Tyrant trio."""
+        self.ultra_boss_active = True
+        self.pending_ultra_spawn = True
+        self.stage_phase = "arrival"
+        self.arrival_timer = 3.2
+        self.arrival_text = "Entering Tyrant Dominion"
+        self.player['x'] = SCREEN_WIDTH // 2
+        self.player['y'] = -100
+        self.player['invulnerable'] = True
+        self.player['invulnerable_timer'] = 120
+
+        self.enemies.clear()
+        self.enemy_bullets.clear()
+        self.powerups.clear()
+
+    def spawn_ultra_boss_trio(self):
+        """Spawn The Tyrant with stage 1 and stage 10 bosses."""
+        self.pending_ultra_spawn = False
+        self.stage_phase = "ultra_boss"
+        self.start_boss_music()
+
+        tyrant_w, tyrant_h = self.get_boss_size('tyrant')
+        tyrant = {
+            'x': SCREEN_WIDTH // 2,
+            'y': SCREEN_HEIGHT - 140,
+            'type': 'boss',
+            'boss_kind': 'tyrant',
+            'width': tyrant_w,
+            'height': tyrant_h,
+            'health': 420,
+            'max_health': 420,
+            'speed': 3.4,
+            'points': 5000,
+            'attack_timer': 0,
+            'attack_mode': 0,
+            'spawn_immunity': 2.0,
+        }
+        self.enemies.append(tyrant)
+
+        # Summoned alongside The Tyrant: first and tenth stage bosses.
+        for idx, kind in enumerate(['octopus', 'overseer']):
+            w, h = self.get_boss_size(kind)
+            ally = {
+                'x': SCREEN_WIDTH // 2 + (-180 if idx == 0 else 180),
+                'y': SCREEN_HEIGHT - 180,
+                'type': 'boss',
+                'boss_kind': kind,
+                'width': w,
+                'height': h,
+                'health': 180,
+                'max_health': 180,
+                'speed': 2.6 if idx == 0 else -2.6,
+                'points': 1200,
+                'attack_timer': 0,
+                'attack_mode': 0,
+                'spawn_immunity': 1.5,
+            }
+            self.enemies.append(ally)
+
+    def trigger_stage_clear(self, message="LEVEL Cleared"):
+        """Start clear animation after boss defeat."""
+        # Explode minions spawned with the boss.
+        for enemy in self.enemies[:]:
+            if enemy['type'] == 'minion':
+                self.create_explosion(enemy['x'], enemy['y'], ORANGE)
+                self.enemies.remove(enemy)
+
+        self.enemy_bullets.clear()
+        self.stage_phase = "clear_anim"
+        self.clear_banner_timer = 2.0
+        self.clear_message = message
+        self.player_departing = True
+        self.player['invulnerable'] = True
+        self.start_background_music()
+
+    def shoot(self):
+        """Player shooting"""
+        self.play_sound('shoot')
+        if self.player['weapon_level'] == 1:
+            # Single shot
+            bullet = {
+                'x': self.player['x'],
+                'y': self.player['y'] + 20,
+                'width': 4,
+                'height': 12,
+                'speed': 12,
+                'color': YELLOW,
+                'damage': 1
+            }
+            self.bullets.append(bullet)
+
+        elif self.player['weapon_level'] == 2:
+            # Double shot
+            for offset in [-8, 8]:
+                bullet = {
+                    'x': self.player['x'] + offset,
+                    'y': self.player['y'] + 20,
+                    'width': 4,
+                    'height': 12,
+                    'speed': 12,
+                    'color': CYAN,
+                    'damage': 1
+                }
+                self.bullets.append(bullet)
+
+        elif self.player['weapon_level'] >= 3:
+            # Triple shot
+            for offset, speed_x in [(-10, -1), (0, 0), (10, 1)]:
+                bullet = {
+                    'x': self.player['x'] + offset,
+                    'y': self.player['y'] + 20,
+                    'width': 4,
+                    'height': 12,
+                    'speed': 12,
+                    'speed_x': speed_x,
+                    'color': GREEN if speed_x == 0 else ORANGE,
+                    'damage': 2 if speed_x == 0 else 1
+                }
+                self.bullets.append(bullet)
+
+    def load_audio(self):
+        """Load sound effects and music from sounds/."""
+        self.sounds['shoot'] = (
+            SoundLoader.load("sounds/shooting.wav.wav")
+            or SoundLoader.load("sounds/shoot.wav")
+        )
+        self.bgm = SoundLoader.load("sounds/background.wav")
+        self.boss_bgm = SoundLoader.load("sounds/boss_battle.wav")
+        if self.bgm:
+            self.bgm.loop = True
+        if self.boss_bgm:
+            self.boss_bgm.loop = True
+
+    def play_sound(self, name):
+        sound = self.sounds.get(name)
+        if sound:
+            sound.play()
+
+    def _switch_music(self, music):
+        if self.current_music is music:
+            return
+        if self.current_music:
+            self.current_music.stop()
+        self.current_music = music
+        if self.current_music:
+            self.current_music.play()
+
+    def start_background_music(self):
+        self._switch_music(self.bgm)
+
+    def start_boss_music(self):
+        self._switch_music(self.boss_bgm if self.boss_bgm else self.bgm)
+
+    def create_explosion(self, x, y, color=ORANGE):
+        """Create explosion particles"""
+        for _ in range(10):
+            self.particles.append(Particle(x, y, color))
+
+    def update_ui(self):
+        """Update UI elements"""
+        self.health_label.text = f"Health: {self.player['lives']}"
+        if self.ultra_boss_active:
+            self.level_label.text = "Level: ULTRA"
+        else:
+            self.level_label.text = f"Level: {self.wave}"
+        self.kills_label.text = f"Kills: {self.enemies_killed}"
+        self.score_label.text = f"Score: {self.score}"
+
+    def update(self, dt):
+        """Main update loop"""
+        if self.game_state == "playing":
+            if self.stage_phase == "arrival":
+                self.arrival_timer = max(0, self.arrival_timer - dt)
+                self.player['y'] = min(100, self.player['y'] + 6.5)
+                if self.arrival_timer <= 0:
+                    if self.pending_ultra_spawn:
+                        self.spawn_ultra_boss_trio()
+                    else:
+                        self.stage_phase = "enemies"
+
+            elif self.stage_phase == "clear_anim":
+                self.clear_banner_timer = max(0, self.clear_banner_timer - dt)
+                if self.player_departing:
+                    self.player['y'] += 8 + (self.wave * 0.15)
+                if self.player['y'] > SCREEN_HEIGHT + 120:
+                    self.player_departing = False
+                    if self.ultra_boss_active:
+                        self.game_state = "victory"
+                    elif self.wave >= self.max_stages:
+                        self.start_ultra_boss_encounter()
+                    else:
+                        self.player['weapon_level'] = min(4, self.player['weapon_level'] + 1)
+                        self.setup_stage(self.wave + 1)
+            else:
+                # Player movement (left/right/up/down controls).
+                if 'left' in self.keys_pressed:
+                    self.player['x'] = max(25, self.player['x'] - self.player['speed'])
+                if 'right' in self.keys_pressed:
+                    self.player['x'] = min(SCREEN_WIDTH - 25, self.player['x'] + self.player['speed'])
+                if 'up' in self.keys_pressed:
+                    self.player['y'] = min(SCREEN_HEIGHT - 50, self.player['y'] + self.player['speed'])
+                if 'down' in self.keys_pressed:
+                    self.player['y'] = max(50, self.player['y'] - self.player['speed'])
+
+                # Auto shooting.
+                if self.shot_timer > 0:
+                    self.shot_timer -= dt
+                delay = 0.1 if self.rapid_fire else max(0.1, 0.26 - self.player['weapon_level'] * 0.025)
+                if self.shot_timer <= 0:
+                    self.shoot()
+                    self.shot_timer = delay
+
+                # Timers
+                if self.player['invulnerable']:
+                    self.player['invulnerable_timer'] -= 1
+                    if self.player['invulnerable_timer'] <= 0:
+                        self.player['invulnerable'] = False
+                if self.shield_active:
+                    self.shield_timer -= dt
+                    if self.shield_timer <= 0:
+                        self.shield_active = False
+                if self.rapid_fire:
+                    self.rapid_timer -= dt
+                    if self.rapid_timer <= 0:
+                        self.rapid_fire = False
+
+                # Enemy spawn phase -> boss phase transition.
+                if self.stage_phase == "enemies":
+                    regular_enemies = [e for e in self.enemies if e['type'] == 'enemy']
+                    target_on_screen = min(6 + self.wave, 14)
+
+                    if self.stage_enemy_kills < self.stage_enemy_target:
+                        self.spawn_timer -= dt
+                        if len(regular_enemies) < target_on_screen and self.spawn_timer <= 0:
+                            self.spawn_stage_enemy()
+                            self.spawn_timer = max(0.14, 0.55 - self.wave * 0.02)
+                    elif len(regular_enemies) == 0:
+                        self.spawn_stage_boss()
+
+                # Update enemies.
+                for enemy in self.enemies[:]:
+                    enemy_type = enemy['type']
+
+                    if enemy_type == 'boss':
+                        # Boss movement.
+                        enemy['x'] += enemy['speed']
+                        if enemy['x'] <= 70:
+                            enemy['x'] = 70
+                            enemy['speed'] = abs(enemy['speed'])
+                        elif enemy['x'] >= SCREEN_WIDTH - 70:
+                            enemy['x'] = SCREEN_WIDTH - 70
+                            enemy['speed'] = -abs(enemy['speed'])
+
+                        if enemy.get('spawn_immunity', 0) > 0:
+                            enemy['spawn_immunity'] -= dt
+
+                        enemy['attack_timer'] += dt
+                        attack_delay = max(0.55, 1.1 - self.wave * 0.03)
+                        if enemy['attack_timer'] >= attack_delay:
+                            enemy['attack_timer'] = 0
+                            boss_kind = enemy.get('boss_kind', 'octopus')
+
+                            if boss_kind == 'octopus':
+                                for vx in [-3, -1.5, 0, 1.5, 3]:
+                                    self.enemy_bullets.append({
+                                        'x': enemy['x'],
+                                        'y': enemy['y'] - 20,
+                                        'width': 6,
+                                        'height': 12,
+                                        'speed': -6,
+                                        'speed_x': vx,
+                                        'color': RED,
+                                        'damage': 1,
+                                        'kind': 'normal',
+                                    })
+                            elif boss_kind == 'grozilla':
+                                if enemy['attack_mode'] == 0:
+                                    # Pattern 1: throws meteors.
+                                    for vx in [-2.8, -1.4, 0, 1.4, 2.8]:
+                                        self.enemy_bullets.append({
+                                            'x': enemy['x'],
+                                            'y': enemy['y'] - 28,
+                                            'width': 12,
+                                            'height': 12,
+                                            'speed': -5.8,
+                                            'speed_x': vx,
+                                            'color': ORANGE,
+                                            'damage': 1,
+                                            'kind': 'meteor_throw',
+                                        })
+                                else:
+                                    # Pattern 2: roaring sound wave.
+                                    for vx in [-4.5, -3, -1.5, 0, 1.5, 3, 4.5]:
+                                        self.enemy_bullets.append({
+                                            'x': enemy['x'],
+                                            'y': enemy['y'] - 16,
+                                            'width': 8,
+                                            'height': 8,
+                                            'speed': -4.2,
+                                            'speed_x': vx,
+                                            'growth': 0.3,
+                                            'life': 1.5,
+                                            'color': CYAN,
+                                            'damage': 1,
+                                            'kind': 'sound_wave',
+                                        })
+                                enemy['attack_mode'] = (enemy['attack_mode'] + 1) % 2
+                            elif boss_kind == 'growly':
+                                # Growly: boomerang knives from both hands.
+                                for hand in [-1, 1]:
+                                    self.enemy_bullets.append({
+                                        'x': enemy['x'] + hand * 22,
+                                        'y': enemy['y'] - 18,
+                                        'width': 10,
+                                        'height': 10,
+                                        'speed': -6.8,
+                                        'speed_x': hand * 6.2,
+                                        'color': WHITE,
+                                        'damage': 1,
+                                        'kind': 'boomerang',
+                                        'phase': 'out',
+                                        'timer': 0,
+                                        'out_time': 1.25,
+                                        'owner': enemy,
+                                    })
+                            elif boss_kind in ['manta', 'warden']:
+                                for vx in [-4.5, -3, -1.5, 0, 1.5, 3, 4.5]:
+                                    self.enemy_bullets.append({
+                                        'x': enemy['x'],
+                                        'y': enemy['y'] - 20,
+                                        'width': 7,
+                                        'height': 10,
+                                        'speed': -5.8,
+                                        'speed_x': vx,
+                                        'color': CYAN,
+                                        'damage': 1,
+                                        'kind': 'normal',
+                                    })
+                            elif boss_kind in ['scorpion', 'serpent', 'behemoth']:
+                                for _ in range(3):
+                                    vx = (SimpleRandom.random() * 6.0) - 3.0
+                                    self.enemy_bullets.append({
+                                        'x': enemy['x'] + vx * 4,
+                                        'y': enemy['y'] - 26,
+                                        'width': 10,
+                                        'height': 10,
+                                        'speed': -6.2,
+                                        'speed_x': vx,
+                                        'color': ORANGE,
+                                        'damage': 1,
+                                        'kind': 'meteor_throw',
+                                    })
+                            elif boss_kind in ['wyvern', 'overseer']:
+                                for hand in [-1, 1]:
+                                    self.enemy_bullets.append({
+                                        'x': enemy['x'] + hand * 26,
+                                        'y': enemy['y'] - 18,
+                                        'width': 10,
+                                        'height': 10,
+                                        'speed': -3.5,
+                                        'speed_x': hand * 4.6,
+                                        'color': WHITE,
+                                        'damage': 1,
+                                        'kind': 'boomerang',
+                                        'phase': 'out',
+                                        'timer': 0,
+                                        'out_time': 0.85,
+                                        'owner': enemy,
+                                    })
+                            elif boss_kind == 'tyrant':
+                                # Tyrant rotates through all major patterns.
+                                mode = enemy['attack_mode'] % 3
+                                if mode == 0:
+                                    for vx in [-5, -3, -1, 1, 3, 5]:
+                                        self.enemy_bullets.append({
+                                            'x': enemy['x'],
+                                            'y': enemy['y'] - 24,
+                                            'width': 9,
+                                            'height': 12,
+                                            'speed': -6.2,
+                                            'speed_x': vx,
+                                            'color': RED,
+                                            'damage': 1,
+                                            'kind': 'normal',
+                                        })
+                                elif mode == 1:
+                                    for vx in [-4.8, -3.2, -1.6, 0, 1.6, 3.2, 4.8]:
+                                        self.enemy_bullets.append({
+                                            'x': enemy['x'],
+                                            'y': enemy['y'] - 18,
+                                            'width': 10,
+                                            'height': 10,
+                                            'speed': -4.5,
+                                            'speed_x': vx,
+                                            'growth': 0.45,
+                                            'life': 1.7,
+                                            'color': CYAN,
+                                            'damage': 1,
+                                            'kind': 'sound_wave',
+                                        })
+                                else:
+                                    for hand in [-1, 1]:
+                                        self.enemy_bullets.append({
+                                            'x': enemy['x'] + hand * 34,
+                                            'y': enemy['y'] - 18,
+                                            'width': 12,
+                                            'height': 12,
+                                            'speed': -4.2,
+                                            'speed_x': hand * 6.4,
+                                            'color': WHITE,
+                                            'damage': 1,
+                                            'kind': 'boomerang',
+                                            'phase': 'out',
+                                            'timer': 0,
+                                            'out_time': 1.05,
+                                            'owner': enemy,
+                                        })
+                                enemy['attack_mode'] = (enemy['attack_mode'] + 1) % 3
+
+                    elif enemy_type == 'minion':
+                        # Dive toward player during boss fight.
+                        dx = self.player['x'] - enemy['x']
+                        if dx > enemy['speed']:
+                            enemy['x'] += enemy['speed']
+                        elif dx < -enemy['speed']:
+                            enemy['x'] -= enemy['speed']
+                        enemy['y'] -= enemy['speed'] * 1.2
+                        if SimpleRandom.random() < 0.01:
+                            self.enemy_bullets.append({
+                                'x': enemy['x'],
+                                'y': enemy['y'] - 8,
+                                'width': 5,
+                                'height': 10,
+                                'speed': -4.5,
+                                'speed_x': 0,
+                                'color': ORANGE,
+                                'damage': 1,
+                                'kind': 'normal',
+                            })
+                        if enemy['y'] < -80:
+                            self.enemies.remove(enemy)
+
+                    else:
+                        # Stage regular enemies.
+                        enemy['x'] += enemy.get('drift', 0)
+                        enemy['y'] -= enemy['speed']
+                        if enemy['sprite_mode'] != 'meteor' and SimpleRandom.random() < enemy.get('shoot_chance', 0):
+                            self.enemy_bullets.append({
+                                'x': enemy['x'],
+                                'y': enemy['y'] - 10,
+                                'width': 4,
+                                'height': 8,
+                                'speed': -5,
+                                'speed_x': 0,
+                                'color': RED,
+                                'damage': 1,
+                                'kind': 'normal',
+                            })
+                        if enemy['y'] < -80 or enemy['x'] < -80 or enemy['x'] > SCREEN_WIDTH + 80:
+                            self.enemies.remove(enemy)
+
+                # Update player bullets.
+                for bullet in self.bullets[:]:
+                    bullet['y'] += bullet['speed']
+                    if 'speed_x' in bullet:
+                        bullet['x'] += bullet['speed_x']
+                    if bullet['y'] > SCREEN_HEIGHT + 40 or bullet['x'] < -40 or bullet['x'] > SCREEN_WIDTH + 40:
+                        self.bullets.remove(bullet)
+
+                # Update enemy bullets (supports boomerangs and sound waves).
+                for bullet in self.enemy_bullets[:]:
+                    kind = bullet.get('kind', 'normal')
+                    if kind == 'boomerang':
+                        bullet['timer'] += dt
+                        if bullet.get('phase') == 'out':
+                            bullet['x'] += bullet['speed_x']
+                            bullet['y'] += bullet['speed']
+                            if bullet['timer'] >= bullet.get('out_time', 0.55):
+                                bullet['phase'] = 'back'
+                        else:
+                            owner = bullet.get('owner')
+                            target_x = owner['x'] if owner in self.enemies else SCREEN_WIDTH // 2
+                            target_y = owner['y'] if owner in self.enemies else SCREEN_HEIGHT - 80
+                            dx = target_x - bullet['x']
+                            dy = target_y - bullet['y']
+                            bullet['x'] += dx * 0.22
+                            bullet['y'] += dy * 0.22
+                            if abs(dx) < 8 and abs(dy) < 8:
+                                self.enemy_bullets.remove(bullet)
+                                continue
+                    else:
+                        bullet['y'] += bullet['speed']
+                        bullet['x'] += bullet.get('speed_x', 0)
+                        if kind == 'sound_wave':
+                            bullet['width'] = min(24, bullet['width'] + bullet.get('growth', 0))
+                            bullet['height'] = min(24, bullet['height'] + bullet.get('growth', 0))
+                            bullet['life'] = bullet.get('life', 0) - dt
+                            if bullet['life'] <= 0:
+                                self.enemy_bullets.remove(bullet)
+                                continue
+
+                    if (bullet['y'] < -60 or bullet['y'] > SCREEN_HEIGHT + 60 or
+                            bullet['x'] < -80 or bullet['x'] > SCREEN_WIDTH + 80):
+                        self.enemy_bullets.remove(bullet)
+
+                # Power-ups drift down slowly.
+                for powerup in self.powerups[:]:
+                    powerup['y'] -= powerup.get('fall_speed', 1.0)
+                    powerup['x'] += powerup.get('drift', 0.0)
+                    if powerup['y'] < -30:
+                        self.powerups.remove(powerup)
+
+                # Collisions.
+                player_rect = {
+                    'x': self.player['x'] - 15,
+                    'y': self.player['y'] - 15,
+                    'width': 30,
+                    'height': 30
+                }
+
+                for bullet in self.bullets[:]:
+                    for enemy in self.enemies[:]:
+                        if (bullet['x'] > enemy['x'] - enemy['width'] // 2 and
+                                bullet['x'] < enemy['x'] + enemy['width'] // 2 and
+                                bullet['y'] > enemy['y'] - enemy['height'] // 2 and
+                                bullet['y'] < enemy['y'] + enemy['height'] // 2):
+
+                            if bullet in self.bullets:
+                                self.bullets.remove(bullet)
+
+                            if enemy['type'] == 'boss' and enemy.get('spawn_immunity', 0) > 0:
+                                break
+
+                            enemy['health'] -= bullet['damage']
+                            if enemy['health'] <= 0:
+                                self.score += enemy['points']
+                                self.enemies_killed += 1
+                                self.create_explosion(enemy['x'], enemy['y'])
+                                self.play_sound('explosion')
+
+                                if enemy in self.enemies:
+                                    self.enemies.remove(enemy)
+
+                                if enemy['type'] == 'enemy':
+                                    self.stage_enemy_kills += 1
+                                    if SimpleRandom.random() < POWERUP_DROP_CHANCE:
+                                        self.powerups.append({
+                                            'x': enemy['x'],
+                                            'y': enemy['y'],
+                                            'type': SimpleRandom.choice(['health', 'weapon', 'shield', 'rapid']),
+                                            'width': 20,
+                                            'height': 20,
+                                            'fall_speed': 0.8 + (SimpleRandom.random() * 0.7),
+                                            'drift': (SimpleRandom.random() * 0.5) - 0.25,
+                                        })
+                                elif enemy['type'] == 'boss':
+                                    if self.stage_phase == "ultra_boss":
+                                        remaining_bosses = [e for e in self.enemies if e.get('type') == 'boss']
+                                        if len(remaining_bosses) == 0:
+                                            self.trigger_stage_clear("The Tyrant Has Fallen")
+                                    else:
+                                        self.trigger_stage_clear()
+                            break
+
+                if not self.player['invulnerable'] and not self.shield_active:
+                    for bullet in self.enemy_bullets[:]:
+                        if (bullet['x'] > player_rect['x'] and
+                                bullet['x'] < player_rect['x'] + player_rect['width'] and
+                                bullet['y'] > player_rect['y'] and
+                                bullet['y'] < player_rect['y'] + player_rect['height']):
+                            self.enemy_bullets.remove(bullet)
+                            self.player['lives'] -= 1
+                            self.player['invulnerable'] = True
+                            self.player['invulnerable_timer'] = 120
+                            self.create_explosion(self.player['x'], self.player['y'], RED)
+                            if self.player['lives'] <= 0:
+                                self.game_state = "game_over"
+                                if self.current_music:
+                                    self.current_music.stop()
+                            break
+
+                if not self.player['invulnerable'] and not self.shield_active:
+                    for enemy in self.enemies[:]:
+                        if (self.player['x'] - 15 < enemy['x'] + enemy['width'] // 2 and
+                                self.player['x'] + 15 > enemy['x'] - enemy['width'] // 2 and
+                                self.player['y'] - 15 < enemy['y'] + enemy['height'] // 2 and
+                                self.player['y'] + 15 > enemy['y'] - enemy['height'] // 2):
+                            if enemy['type'] != 'boss' and enemy in self.enemies:
+                                self.enemies.remove(enemy)
+                            self.player['lives'] -= 1
+                            self.player['invulnerable'] = True
+                            self.player['invulnerable_timer'] = 120
+                            self.create_explosion(self.player['x'], self.player['y'], RED)
+                            if self.player['lives'] <= 0:
+                                self.game_state = "game_over"
+                            break
+
+                # Power-up collection.
+                for powerup in self.powerups[:]:
+                    if (self.player['x'] - 15 < powerup['x'] + 10 and
+                            self.player['x'] + 15 > powerup['x'] - 10 and
+                            self.player['y'] - 15 < powerup['y'] + 10 and
+                            self.player['y'] + 15 > powerup['y'] - 10):
+                        self.powerups.remove(powerup)
+                        if powerup['type'] == 'health':
+                            self.player['lives'] = min(5, self.player['lives'] + 1)
+                        elif powerup['type'] == 'weapon':
+                            self.player['weapon_level'] = min(4, self.player['weapon_level'] + 1)
+                        elif powerup['type'] == 'shield':
+                            self.shield_active = True
+                            self.shield_timer = 5
+                        elif powerup['type'] == 'rapid':
+                            self.rapid_fire = True
+                            self.rapid_timer = 5
+
+            self.update_ui()
+
+        # Update starfield
+        self.starfield.update()
+        self.particles = [p for p in self.particles if p.update()]
+
+        # Redraw
+        self.canvas.clear()
+        self.draw()
+
+    def draw(self):
+        """Draw everything"""
+        with self.canvas:
+            # Fill full window (letterbox region)
+            Color(0, 0, 0, 1)
+            Rectangle(pos=(0, 0), size=self.size)
+
+            # Render game in virtual resolution with responsive scaling.
+            scale = min(self.width / SCREEN_WIDTH, self.height / SCREEN_HEIGHT)
+            offset_x = (self.width - (SCREEN_WIDTH * scale)) / 2
+            offset_y = (self.height - (SCREEN_HEIGHT * scale)) / 2
+
+            PushMatrix()
+            Translate(offset_x, offset_y, 0)
+            Scale(scale, scale, 1)
+
+            self.draw_stage_background()
+
+            if self.game_state == "menu":
+                self.draw_menu()
+            elif self.game_state == "playing":
+                self.draw_game()
+            elif self.game_state == "game_over":
+                self.draw_game_over()
+            elif self.game_state == "victory":
+                self.draw_victory()
+
+            PopMatrix()
+
+    def draw_stage_background(self):
+        """Draw stage-dependent scenery."""
+        theme = self.current_profile.get('theme', 'space')
+
+        if theme == 'kong':
+            Color(0.09, 0.05, 0.03, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+
+            # Static meteor belt backdrop.
+            for chunk in self.bg_meteor_chunks:
+                Color(0.25, 0.18, 0.14, 1)
+                Rectangle(
+                    pos=(self.px(chunk['x']), self.px(chunk['y'])),
+                    size=(chunk['size'], chunk['size'])
+                )
+                Color(0.36, 0.26, 0.18, 1)
+                Rectangle(
+                    pos=(self.px(chunk['x'] + 2), self.px(chunk['y'] + 2)),
+                    size=(max(4, chunk['size'] - 6), max(4, chunk['size'] - 6))
+                )
+
+            for star in self.starfield.stars:
+                Color(0.9, 0.6, 0.35, 1)
+                Rectangle(pos=(self.px(star['x']), self.px(star['y'])), size=(2, 8))
+
+        elif theme == 'saturn':
+            Color(0.04, 0.02, 0.08, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+
+            for star in self.bg_saturn_stars:
+                Color(0.9, 0.9, 1, 1)
+                size = max(2, star['size'] * 2)
+                Rectangle(pos=(self.px(star['x']), self.px(star['y'])), size=(size, size))
+
+            # Saturn-like ringed planet.
+            Color(0.78, 0.70, 0.36, 1)
+            Rectangle(pos=(self.px(650), self.px(420)), size=(140, 140))
+            Color(0.95, 0.82, 0.50, 0.9)
+            Rectangle(pos=(self.px(610), self.px(474)), size=(220, 22))
+            Color(0.72, 0.62, 0.31, 0.9)
+            Rectangle(pos=(self.px(626), self.px(462)), size=(188, 16))
+
+        elif theme == 'nebula':
+            Color(0.07, 0.03, 0.12, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            Color(0.25, 0.12, 0.45, 0.45)
+            Rectangle(pos=(self.px(120), self.px(260)), size=(320, 180))
+            Color(0.12, 0.35, 0.65, 0.35)
+            Rectangle(pos=(self.px(460), self.px(180)), size=(300, 220))
+            self.starfield.draw(self.canvas)
+
+        elif theme == 'ember':
+            Color(0.12, 0.05, 0.02, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            for idx in range(7):
+                Color(0.42, 0.16 + idx * 0.03, 0.08, 0.35)
+                Rectangle(pos=(0, idx * 100), size=(SCREEN_WIDTH, 70))
+
+        elif theme == 'frost':
+            Color(0.03, 0.08, 0.14, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            Color(0.65, 0.9, 1.0, 0.25)
+            Rectangle(pos=(self.px(80), self.px(120)), size=(740, 120))
+            self.starfield.draw(self.canvas)
+
+        elif theme == 'toxic':
+            Color(0.05, 0.10, 0.04, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            for idx in range(9):
+                Color(0.20 + idx * 0.02, 0.34 + idx * 0.01, 0.10, 0.25)
+                Rectangle(pos=(0, idx * 80), size=(SCREEN_WIDTH, 40))
+
+        elif theme == 'quantum':
+            Color(0.03, 0.03, 0.09, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            for idx in range(12):
+                Color(0.25, 0.2, 0.5, 0.24)
+                Rectangle(pos=(idx * 80, 0), size=(4, SCREEN_HEIGHT))
+            self.starfield.draw(self.canvas)
+
+        elif theme == 'void':
+            Color(0.01, 0.01, 0.03, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            Color(0.2, 0.0, 0.25, 0.35)
+            Rectangle(pos=(self.px(220), self.px(220)), size=(460, 260))
+
+        elif theme == 'eclipse':
+            Color(0.04, 0.02, 0.02, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            Color(0.85, 0.55, 0.08, 0.25)
+            Rectangle(pos=(self.px(350), self.px(430)), size=(190, 190))
+            Color(0.10, 0.08, 0.08, 1)
+            Rectangle(pos=(self.px(390), self.px(470)), size=(110, 110))
+
+        else:
+            Color(0, 0, 0.1, 1)
+            Rectangle(pos=(0, 0), size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            self.starfield.draw(self.canvas)
+
+    def draw_text(self, text, center_x, center_y, color=WHITE, font_size=26):
+        """Draw centered text with Kivy core text."""
+        core_label = CoreLabel(text=text, font_size=font_size, color=color)
+        core_label.refresh()
+        texture = core_label.texture
+        Color(*color)
+        Rectangle(
+            texture=texture,
+            pos=(center_x - texture.width / 2, center_y - texture.height / 2),
+            size=texture.size
+        )
+
+    def draw_text_left(self, text, x, y, color=WHITE, font_size=22):
+        """Draw left-aligned text."""
+        core_label = CoreLabel(text=text, font_size=font_size, color=color)
+        core_label.refresh()
+        texture = core_label.texture
+        Color(*color)
+        Rectangle(texture=texture, pos=(x, y), size=texture.size)
+
+    def px(self, value):
+        return int(value // PIXEL_SIZE) * PIXEL_SIZE
+
+    def draw_pixel_sprite(self, center_x, center_y, pattern, palette, scale=PIXEL_SIZE):
+        """Draw pixel-art sprite from text pattern."""
+        height = len(pattern)
+        width = max(len(row) for row in pattern)
+        origin_x = self.px(center_x - (width * scale) / 2)
+        origin_y = self.px(center_y - (height * scale) / 2)
+
+        for row_idx, row in enumerate(pattern):
+            row = row.ljust(width, ".")
+            for col_idx, pixel in enumerate(row):
+                color = palette.get(pixel)
+                if color:
+                    Color(*color)
+                    x = origin_x + (col_idx * scale)
+                    y = origin_y + ((height - 1 - row_idx) * scale)
+                    Rectangle(pos=(x, y), size=(scale, scale))
+
+    def darken(self, color, amount=0.35):
+        r, g, b, a = color
+        return (max(0, r - amount), max(0, g - amount), max(0, b - amount), a)
+
+    def draw_menu(self):
+        """Draw menu screen"""
+        with self.canvas:
+            self.draw_text("SPACE SHOOTER", SCREEN_WIDTH // 2, 560, color=CYAN, font_size=56)
+            self.draw_text("Press SPACE to Start", SCREEN_WIDTH // 2, 440, color=WHITE, font_size=32)
+            self.draw_text("Arrow Keys to Move (UP/DOWN enabled, Auto Fire)", SCREEN_WIDTH // 2, 380, color=WHITE, font_size=22)
+            self.draw_text("Clear all 10 stages and defeat every boss", SCREEN_WIDTH // 2, 320, color=ORANGE, font_size=20)
+
+    def draw_game(self):
+        """Draw game screen"""
+        with self.canvas:
+            # Draw power-ups
+            for powerup in self.powerups:
+                if powerup['type'] == 'health':
+                    icon_pattern = [
+                        "..11..",
+                        ".1221.",
+                        "122221",
+                        ".1221.",
+                        "..11..",
+                    ]
+                    icon_palette = {
+                        "1": (0.45, 1.0, 0.45, 1),
+                        "2": (0.12, 0.72, 0.12, 1),
+                    }
+                elif powerup['type'] == 'weapon':
+                    icon_pattern = [
+                        "3....3",
+                        ".3333.",
+                        "..33..",
+                        ".3333.",
+                        "3....3",
+                    ]
+                    icon_palette = {
+                        "3": (0.20, 0.60, 1.0, 1),
+                    }
+                elif powerup['type'] == 'shield':
+                    icon_pattern = [
+                        "..44..",
+                        ".4444.",
+                        "444444",
+                        ".4444.",
+                        "..44..",
+                    ]
+                    icon_palette = {
+                        "4": (0.60, 0.60, 1.0, 1),
+                    }
+                else:  # rapid
+                    icon_pattern = [
+                        "5....5",
+                        ".5555.",
+                        "..55..",
+                        ".5555.",
+                        "5....5",
+                    ]
+                    icon_palette = {
+                        "5": (1.0, 0.62, 0.12, 1),
+                    }
+
+                self.draw_pixel_sprite(powerup['x'], powerup['y'], icon_pattern, icon_palette, scale=3)
+
+            # Draw enemies
+            for enemy in self.enemies:
+                if enemy['type'] == 'boss':
+                    boss_kind = enemy.get('boss_kind', 'octopus')
+                    if boss_kind == 'grozilla':
+                        # Grozilla: gorilla with eyepatch
+                        boss_pattern = [
+                            "........4444444........",
+                            "......44433333444......",
+                            ".....4433333333344.....",
+                            "....443332222333344....",
+                            "...4433332...23333344...",
+                            "...433333222223333334...",
+                            "...433333333333333334...",
+                            "..44333333333333333344..",
+                            "..44333333111113333344..",
+                            "...4333333111113333334...",
+                            "...4333333111113333334...",
+                            "...4433333311113333344...",
+                            "....44333333333333344....",
+                            ".....443333333333344.....",
+                            "......4433333333344......",
+                            ".....444..333..444.......",
+                            "....444....3....444......",
+                            "...444.....3.....444.....",
+                            "..444......3......444....",
+                            ".444.......3.......444...",
+                        ]
+                        boss_palette = {
+                            "4": (0.24, 0.14, 0.10, 1),
+                            "3": (0.55, 0.36, 0.24, 1),
+                            "2": (0.05, 0.05, 0.05, 1),  # eyepatch
+                            "1": (0.92, 0.78, 0.46, 1),  # face highlight
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=3)
+                    elif boss_kind == 'growly':
+                        # Growly: wolf boss with X scar on chest
+                        boss_pattern = [
+                            ".........55555.........",
+                            ".......555333555.......",
+                            "......55333333355......",
+                            ".....55333333333355.....",
+                            "....5533311111333355....",
+                            "...553333111111333355...",
+                            "...553333111111333355...",
+                            "..55333333111133333355..",
+                            "..55333333333333333355..",
+                            "..55333333333333333355..",
+                            "...553333322223333355...",
+                            "...5533332...2333355....",
+                            "...553333.2.2.333355....",
+                            "...553333..2..333355....",
+                            "....55333.2.2.33355.....",
+                            ".....553332...23355.....",
+                            "......553333333355......",
+                            "......555333333555......",
+                            ".......55.....55........",
+                        ]
+                        boss_palette = {
+                            "5": (0.18, 0.20, 0.24, 1),
+                            "3": (0.60, 0.62, 0.66, 1),
+                            "2": (0.95, 0.18, 0.18, 1),  # X scar
+                            "1": (0.98, 0.95, 0.85, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=3)
+                    elif boss_kind == 'manta':
+                        boss_pattern = [
+                            "........11111111........",
+                            ".....11122222222111.....",
+                            "..11122223333332222111..",
+                            "112222333333333333222211",
+                            "..11122223333332222111..",
+                            ".....11122222222111.....",
+                            "........11....11........",
+                        ]
+                        boss_palette = {
+                            "1": (0.22, 0.14, 0.35, 1),
+                            "2": (0.46, 0.28, 0.70, 1),
+                            "3": (0.70, 0.45, 0.95, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=4)
+                    elif boss_kind == 'scorpion':
+                        boss_pattern = [
+                            ".......4444444.......",
+                            "....4443333333444....",
+                            "...443333333333344...",
+                            "..44333222222333344..",
+                            "..44333333333333344..",
+                            "...443333333333344...",
+                            "....44..333..44......",
+                            "....4...333...4......",
+                            "...44...333...44.....",
+                            "..44....333....44....",
+                            ".44.....333.....44...",
+                            "44......333......44..",
+                        ]
+                        boss_palette = {
+                            "4": (0.30, 0.15, 0.06, 1),
+                            "3": (0.70, 0.34, 0.10, 1),
+                            "2": (0.98, 0.66, 0.20, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=4)
+                    elif boss_kind == 'wyvern':
+                        boss_pattern = [
+                            ".........55555.........",
+                            "......55533333555......",
+                            "...55553333333335555...",
+                            "..5533333222233333355..",
+                            ".553333322222233333355.",
+                            "..55333333333333333355..",
+                            "...553333311113333355...",
+                            "....553333111333355.....",
+                            ".....5533311133355......",
+                            "......55331113355.......",
+                            ".......553111355........",
+                        ]
+                        boss_palette = {
+                            "5": (0.12, 0.22, 0.28, 1),
+                            "3": (0.30, 0.55, 0.68, 1),
+                            "2": (0.75, 0.92, 1.0, 1),
+                            "1": (0.92, 0.98, 1.0, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=4)
+                    elif boss_kind == 'serpent':
+                        boss_pattern = [
+                            "......444.............",
+                            "....4433344...........",
+                            "...433333344..........",
+                            "..43333333344.........",
+                            "...44333333344........",
+                            "....44333333344.......",
+                            ".....44333333344......",
+                            "......44333333344.....",
+                            ".......44333333344....",
+                            "........44333333344...",
+                            ".........44333333344..",
+                        ]
+                        boss_palette = {
+                            "4": (0.12, 0.25, 0.10, 1),
+                            "3": (0.34, 0.70, 0.25, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=4)
+                    elif boss_kind == 'warden':
+                        boss_pattern = [
+                            "......6666666666......",
+                            "....66633333333666....",
+                            "...6633333333333366...",
+                            "..663333311113333366..",
+                            "..663333311113333366..",
+                            "..663333333333333366..",
+                            "...66333334443333366...",
+                            "....66633333333666....",
+                            "......6666666666......",
+                        ]
+                        boss_palette = {
+                            "6": (0.18, 0.16, 0.35, 1),
+                            "3": (0.45, 0.43, 0.92, 1),
+                            "4": (0.95, 0.95, 1.0, 1),
+                            "1": (0.88, 0.82, 1.0, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=5)
+                    elif boss_kind == 'behemoth':
+                        boss_pattern = [
+                            "....7777777777777....",
+                            "..77733333333333777..",
+                            ".7733333333333333377.",
+                            "773333332222233333377",
+                            "773333322222223333377",
+                            ".7733333333333333377.",
+                            "..77733333333333777..",
+                            "...77773333337777....",
+                            "....777733337777.....",
+                        ]
+                        boss_palette = {
+                            "7": (0.15, 0.12, 0.12, 1),
+                            "3": (0.45, 0.38, 0.38, 1),
+                            "2": (0.80, 0.10, 0.10, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=5)
+                    elif boss_kind == 'overseer':
+                        boss_pattern = [
+                            "......88888888......",
+                            "....888333333888....",
+                            "...88333333333388...",
+                            "..8833333111333388..",
+                            "..8833333111333388..",
+                            "..8833333333333388..",
+                            "...88333334433388...",
+                            "....888333333888....",
+                            "......88888888......",
+                            ".......88..88.......",
+                            "......88....88......",
+                        ]
+                        boss_palette = {
+                            "8": (0.30, 0.24, 0.05, 1),
+                            "3": (0.95, 0.80, 0.20, 1),
+                            "4": (1.0, 0.94, 0.55, 1),
+                            "1": (0.98, 0.9, 0.45, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=5)
+                    elif boss_kind == 'tyrant':
+                        boss_pattern = [
+                            "..........9999999999..........",
+                            "......999933333333339999......",
+                            "...999333333333333333333999...",
+                            "..9933333322222222333333399..",
+                            ".993333322221111222233333399.",
+                            "9933333222111111122233333399",
+                            "9933333222111111122233333399",
+                            ".993333322221111222233333399.",
+                            "..9933333322222222333333399..",
+                            "...999333333333333333333999...",
+                            "......999933333333339999......",
+                            "..........9999999999..........",
+                            ".........99..9999..99.........",
+                            "........99...9999...99........",
+                            ".......99....9999....99.......",
+                        ]
+                        boss_palette = {
+                            "9": (0.32, 0.02, 0.02, 1),
+                            "3": (0.80, 0.12, 0.12, 1),
+                            "2": (0.96, 0.32, 0.12, 1),
+                            "1": (0.98, 0.94, 0.75, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=4)
+                    else:
+                        # Stage 1 octopus boss
+                        boss_pattern = [
+                            "............444............",
+                            "..........44333344..........",
+                            ".........4333333334.........",
+                            "........433333333334........",
+                            ".......43333333333334.......",
+                            "......4333333333333334......",
+                            ".....443333333333333344.....",
+                            ".....43333.33333.333334.....",
+                            ".....4333...333...33334.....",
+                            "....44333...333...333344....",
+                            "....43333...333...333334....",
+                            "....433333.33333.3333334....",
+                            "....44333333333333333344....",
+                            ".....444444444444444444.....",
+                            "......44....44....44......",
+                            ".....44.....44.....44.....",
+                            "....44......44......44....",
+                            "...44.......44.......44...",
+                            "..44........44........44..",
+                            ".44.........44.........44.",
+                            "44..........44..........44",
+                            "44..........44..........44",
+                            ".44.........44.........44.",
+                            "..44........44........44..",
+                            "...44.......44.......44...",
+                            "....44......44......44....",
+                            ".....44.....44.....44.....",
+                            "......44....44....44......",
+                            ".......44...44...44.......",
+                            "........44..44..44........",
+                            ".........44.44.44.........",
+                            "..........44444..........",
+                        ]
+                        boss_palette = {
+                            "4": (0.34, 0.10, 0.40, 1),
+                            "3": (1.00, 0.45, 0.10, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], boss_pattern, boss_palette, scale=3)
+
+                    # Health bar
+                    health_percent = enemy['health'] / enemy['max_health']
+                    Color(1, 0, 0, 1)
+                    Rectangle(pos=(self.px(enemy['x'] - 40), self.px(enemy['y'] - 52)), size=(80, 8))
+                    Color(0, 1, 0, 1)
+                    Rectangle(pos=(self.px(enemy['x'] - 40), self.px(enemy['y'] - 52)), size=(80 * health_percent, 8))
+                elif enemy['type'] == 'minion':
+                    minion_pattern = [
+                        "..1111..",
+                        ".122221.",
+                        "12233221",
+                        ".122221.",
+                        "..1..1..",
+                    ]
+                    minion_palette = {
+                        "1": (0.35, 0.2, 0.5, 1),
+                        "2": (0.85, 0.45, 0.25, 1),
+                        "3": (1, 0.9, 0.6, 1),
+                    }
+                    self.draw_pixel_sprite(enemy['x'], enemy['y'], minion_pattern, minion_palette, scale=3)
+                else:
+                    sprite_mode = enemy.get('sprite_mode', 'alien')
+                    variant = enemy.get('variant', 'basic')
+
+                    if sprite_mode == 'meteor':
+                        meteor_pattern = [
+                            "...111...",
+                            "..12221..",
+                            ".1223321.",
+                            ".1233331.",
+                            ".1223321.",
+                            "..12221..",
+                            "...111...",
+                        ]
+                        meteor_palette = {
+                            "1": (0.28, 0.20, 0.14, 1),
+                            "2": (0.44, 0.30, 0.18, 1),
+                            "3": (0.70, 0.44, 0.20, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], meteor_pattern, meteor_palette, scale=3)
+                    elif sprite_mode == 'hybrid':
+                        hybrid_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1233444321",
+                            "1223333221",
+                            ".12222221.",
+                            "..12..21..",
+                        ]
+                        hybrid_palette = {
+                            "1": (0.22, 0.16, 0.12, 1),
+                            "2": (0.22, 0.62, 0.95, 1),
+                            "3": (0.92, 0.58, 0.20, 1),
+                            "4": (0.96, 0.94, 0.86, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], hybrid_pattern, hybrid_palette, scale=4)
+                    elif sprite_mode == 'nebula':
+                        nebula_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1233444321",
+                            "1223333221",
+                            ".12222221.",
+                            "..11..11..",
+                        ]
+                        nebula_palette = {
+                            "1": (0.20, 0.10, 0.32, 1),
+                            "2": (0.52, 0.22, 0.72, 1),
+                            "3": (0.72, 0.38, 0.95, 1),
+                            "4": (0.90, 0.75, 1.00, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], nebula_pattern, nebula_palette, scale=4)
+                    elif sprite_mode == 'ember':
+                        ember_pattern = [
+                            "..1111..",
+                            ".122221.",
+                            "12233221",
+                            "12333321",
+                            "12233221",
+                            ".122221.",
+                            "..1111..",
+                        ]
+                        ember_palette = {
+                            "1": (0.28, 0.12, 0.05, 1),
+                            "2": (0.70, 0.28, 0.08, 1),
+                            "3": (1.00, 0.55, 0.12, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], ember_pattern, ember_palette, scale=4)
+                    elif sprite_mode == 'frost':
+                        frost_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1233444321",
+                            "1223333221",
+                            ".12222221.",
+                            "..1.22.1..",
+                        ]
+                        frost_palette = {
+                            "1": (0.12, 0.28, 0.35, 1),
+                            "2": (0.35, 0.70, 0.85, 1),
+                            "3": (0.75, 0.95, 1.00, 1),
+                            "4": (1.00, 1.00, 1.00, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], frost_pattern, frost_palette, scale=4)
+                    elif sprite_mode == 'toxic':
+                        toxic_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1233333321",
+                            "1223333221",
+                            ".12222221.",
+                            "..12..21..",
+                        ]
+                        toxic_palette = {
+                            "1": (0.08, 0.25, 0.06, 1),
+                            "2": (0.30, 0.70, 0.20, 1),
+                            "3": (0.68, 1.00, 0.25, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], toxic_pattern, toxic_palette, scale=4)
+                    elif sprite_mode == 'quantum':
+                        quantum_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1234444321",
+                            "1223333221",
+                            ".12222221.",
+                            "..11..11..",
+                        ]
+                        quantum_palette = {
+                            "1": (0.15, 0.14, 0.38, 1),
+                            "2": (0.34, 0.30, 0.78, 1),
+                            "3": (0.62, 0.50, 1.00, 1),
+                            "4": (0.90, 0.86, 1.00, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], quantum_pattern, quantum_palette, scale=4)
+                    elif sprite_mode == 'void':
+                        void_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1233333321",
+                            "1223333221",
+                            ".12222221.",
+                            "..1....1..",
+                        ]
+                        void_palette = {
+                            "1": (0.05, 0.05, 0.10, 1),
+                            "2": (0.22, 0.22, 0.30, 1),
+                            "3": (0.45, 0.10, 0.55, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], void_pattern, void_palette, scale=4)
+                    elif sprite_mode == 'eclipse':
+                        eclipse_pattern = [
+                            "..111111..",
+                            ".12222221.",
+                            "1223333221",
+                            "1234444321",
+                            "1223333221",
+                            ".12222221.",
+                            "..12..21..",
+                        ]
+                        eclipse_palette = {
+                            "1": (0.22, 0.16, 0.02, 1),
+                            "2": (0.66, 0.52, 0.10, 1),
+                            "3": (0.95, 0.78, 0.20, 1),
+                            "4": (0.98, 0.92, 0.55, 1),
+                        }
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], eclipse_pattern, eclipse_palette, scale=4)
+                    else:
+                        # Stage 1 alien ships
+                        body = enemy['color']
+                        dark = self.darken(body)
+                        alien_palette = {
+                            "1": dark,
+                            "2": body,
+                            "3": (0.95, 0.95, 1.0, 1),
+                        }
+                        if variant == 'fast':
+                            alien_pattern = [
+                                "..1111..",
+                                ".122221.",
+                                "12233221",
+                                ".122221.",
+                                "..1..1..",
+                            ]
+                        elif variant == 'tank':
+                            alien_pattern = [
+                                "...111111...",
+                                "..12222221..",
+                                ".1223333221.",
+                                "122233333221",
+                                "122333333221",
+                                ".1223333221.",
+                                "..12....21..",
+                            ]
+                        else:
+                            alien_pattern = [
+                                "..111111..",
+                                ".12222221.",
+                                "1223333221",
+                                "1223333221",
+                                ".12222221.",
+                                "..12..21..",
+                            ]
+                        self.draw_pixel_sprite(enemy['x'], enemy['y'], alien_pattern, alien_palette, scale=4)
+
+                    # Tank health bar
+                    if variant == 'tank':
+                        health_percent = enemy['health'] / 3
+                        Color(1, 0, 0, 1)
+                        Rectangle(pos=(self.px(enemy['x'] - 20), self.px(enemy['y'] - 28)), size=(40, 6))
+                        Color(0, 1, 0, 1)
+                        Rectangle(pos=(self.px(enemy['x'] - 20), self.px(enemy['y'] - 28)), size=(40 * health_percent, 6))
+
+            # Draw bullets
+            for bullet in self.bullets:
+                Color(*bullet['color'])
+                Rectangle(pos=(self.px(bullet['x'] - 2), self.px(bullet['y'])), size=(4, 12))
+
+            for bullet in self.enemy_bullets:
+                kind = bullet.get('kind', 'normal')
+                Color(*bullet['color'])
+                if kind == 'sound_wave':
+                    width = bullet.get('width', 8)
+                    height = bullet.get('height', 8)
+                    Rectangle(pos=(self.px(bullet['x'] - width / 2), self.px(bullet['y'] - height / 2)),
+                              size=(width, height))
+                elif kind == 'meteor_throw':
+                    Rectangle(pos=(self.px(bullet['x'] - 6), self.px(bullet['y'] - 6)), size=(12, 12))
+                elif kind == 'boomerang':
+                    Rectangle(pos=(self.px(bullet['x'] - 5), self.px(bullet['y'] - 5)), size=(10, 10))
+                else:
+                    Rectangle(pos=(self.px(bullet['x'] - 4), self.px(bullet['y'] - 8)), size=(8, 12))
+
+            # Draw particles
+            for particle in self.particles:
+                particle.draw(self.canvas)
+
+            # Draw player
+            if not self.player['invulnerable'] or (self.player['invulnerable_timer'] // 10 % 2 == 0):
+                # Draw shield if active
+                if self.shield_active:
+                    Color(0.2, 0.5, 1, 0.3)
+                    Rectangle(
+                        pos=(self.px(self.player['x'] - 28), self.px(self.player['y'] - 28)),
+                        size=(56, 56)
+                    )
+
+                # Pixel spaceship sprite
+                ship_pattern = [
+                    ".....................",
+                    ".........ooo.........",
+                    "........ooooo........",
+                    ".......ooooooo.......",
+                    "......ooooooooo......",
+                    ".....ooooooooooo.....",
+                    "....ooooooooooooo....",
+                    "...ooooooooooooooo...",
+                    "..ooooooooooooooooo..",
+                    ".ooooooooooooooooooo.",
+                    "ooooooooooooooooooooo",
+                    ".ooooooooo.ooooooooo.",
+                    "..ooooooo...ooooooo..",
+                    "...ooooo.....ooooo...",
+                    "....ooo.......ooo....",
+                    ".....o.........o.....",
+                    "....o.o.......o.o....",
+                    "...o...o.....o...o...",
+                    "..o.....o...o.....o..",
+                    ".o.......o.o.......o.",
+                    "o.........o.........o",
+                ]
+                ship_palette = {
+                    "o": (0.65, 0.9, 1.0, 1),
+                }
+                self.draw_pixel_sprite(self.player['x'], self.player['y'], ship_pattern, ship_palette, scale=2)
+
+                # Draw engine fire if moving
+                if 'up' in self.keys_pressed:
+                    Color(1, 0.5, 0, 1)
+                    Rectangle(
+                        pos=(self.px(self.player['x'] - 8), self.px(self.player['y'] - 22)),
+                        size=(16, 12)
+                    )
+
+            # Left-side HUD (always visible in-game)
+            self.draw_text_left(f"Health: {self.player['lives']}", 20, SCREEN_HEIGHT - 44, color=(1, 0.35, 0.35, 1), font_size=22)
+            self.draw_text_left(f"Level: {self.wave}", 20, SCREEN_HEIGHT - 74, color=WHITE, font_size=20)
+            self.draw_text_left(f"Kills: {self.enemies_killed}", 20, SCREEN_HEIGHT - 104, color=(0.7, 1, 0.7, 1), font_size=20)
+            self.draw_text_left(f"Score: {self.score}", 20, SCREEN_HEIGHT - 134, color=WHITE, font_size=18)
+
+            if self.stage_phase == "arrival":
+                self.draw_text(self.arrival_text, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, color=CYAN, font_size=40)
+            elif self.stage_phase == "clear_anim":
+                self.draw_text(self.clear_message, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, color=GREEN, font_size=44)
+
+    def draw_game_over(self):
+        """Draw game over screen"""
+        with self.canvas:
+            self.draw_text("GAME OVER", SCREEN_WIDTH // 2, 520, color=RED, font_size=56)
+            self.draw_text(f"Final Score: {self.score}", SCREEN_WIDTH // 2, 400, color=WHITE, font_size=30)
+            self.draw_text(f"Level Reached: {self.wave}", SCREEN_WIDTH // 2, 350, color=WHITE, font_size=24)
+            self.draw_text("Press R to Restart or Q to Quit", SCREEN_WIDTH // 2, 260, color=WHITE, font_size=22)
+
+    def draw_victory(self):
+        """Draw victory screen"""
+        with self.canvas:
+            self.draw_text("VICTORY!", SCREEN_WIDTH // 2, 540, color=GREEN, font_size=58)
+            self.draw_text("You cleared all 10 stages", SCREEN_WIDTH // 2, 430, color=WHITE, font_size=28)
+            self.draw_text(f"Final Score: {self.score}", SCREEN_WIDTH // 2, 370, color=WHITE, font_size=28)
+            self.draw_text("Press R to Play Again or Q to Quit", SCREEN_WIDTH // 2, 270, color=WHITE, font_size=22)
+
+
+class NewShootingGameApp(App):
+    def build(self):
+        return SpaceShooterGame()
+
+
+if __name__ == "__main__":
+    NewShootingGameApp().run()
