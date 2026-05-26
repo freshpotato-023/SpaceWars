@@ -1,7 +1,7 @@
-# TODO
+# TODO - D-PAD Buttons on Bottom of Game
 
-## Completed
-- [x] Wire provided `sounds/*.wav` into gameplay events (background loop, shoot/explosion/death/gameover/boss battle)
+- [ ] Inspect Space Shooting Game.html for existing input system and UI panels
+- [ ] Add bottom D-pad UI (Left/Right/Up/Down + Fire) with pointer/touch support
 - [x] SQLite-backed login/high-score via Flask + game_records.db (server.py)
 - [x] Validate: keyboard movement unchanged; touch buttons move and stop correctly; audio works; DB login/save works
 

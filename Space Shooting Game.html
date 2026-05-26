@@ -140,6 +140,96 @@
             z-index: 15;
         }
 
+        /* Mobile touch controls */
+        .dpad-controls {
+            position: absolute;
+            left: 18px;
+            right: 18px;
+            bottom: 12px;
+            height: 120px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 16px;
+            z-index: 12;
+            pointer-events: none; /* enable only buttons */
+        }
+
+        /* (unused) dpad-side kept for compatibility */
+        .dpad-side {
+            display: flex;
+            gap: 14px;
+            align-items: flex-end;
+            pointer-events: none;
+        }
+
+        .dpad {
+            width: 120px;
+            height: 96px;
+            position: relative;
+            pointer-events: auto;
+        }
+
+        .dpad-btn {
+            position: absolute;
+            width: 60px;
+            height: 60px;
+            border-radius: 18px;
+            border: 1px solid rgba(42, 170, 255, 0.75);
+            background: rgba(10, 25, 55, 0.55);
+            color: #dff;
+            font-weight: 900;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 12px rgba(0,255,255,0.12);
+            touch-action: none;
+            user-select: none;
+        }
+        .dpad-btn:active { background: rgba(0, 180, 255, 0.18); }
+
+        .dpad-btn.up { left: 50px; top: 14px; }
+        .dpad-btn.down { left: 50px; bottom: 14px; }
+        .dpad-btn.left { left: 14px; top: 50px; }
+        .dpad-btn.right { right: 14px; top: 50px; }
+
+        .firepad {
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .fire-btn {
+            width: 74px;
+            height: 74px;
+            border-radius: 24px;
+            border: 1px solid rgba(42, 170, 255, 0.85);
+            background: rgba(10, 20, 40, 0.55);
+            color: #fff;
+            font-weight: 900;
+            font-size: 22px;
+            box-shadow: 0 0 18px rgba(0,255,255,0.14);
+            touch-action: none;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        @media (max-width: 520px) {
+            .dpad-controls { height: 105px; bottom: 8px; }
+            .dpad { width: 140px; height: 105px; }
+            .dpad-btn { width: 48px; height: 48px; border-radius: 14px; }
+            .dpad-btn.up { left: 48px; top: 12px; }
+            .dpad-btn.down { left: 48px; bottom: 12px; }
+            .dpad-btn.left { left: 12px; top: 46px; }
+            .dpad-btn.right { right: 12px; top: 46px; }
+            .fire-btn { width: 70px; height: 70px; border-radius: 22px; }
+        }
+
 
     </style>
 </head>
@@ -147,6 +237,9 @@
 <div class="game-container" id="gameContainer">
     <canvas id="gameCanvas" width="900" height="700"></canvas>
     <div id="pauseHint" class="pause-icon">⏸️ P / ESC</div>
+
+
+
 
     
 
@@ -703,7 +796,9 @@ UNLOAD YOUR ARMOR ⚠️`;
 
             
             // shooting
-            if(shotCooldown <= 0 && (keysPressed.has(' ') || keysPressed.has('z') || keysPressed.has('Z'))) {
+            // Auto-fire on mobile/controls: continuously fire while playing (no need to press fire).
+            // Z/Space also works; this condition keeps backwards compatibility.
+            if(shotCooldown <= 0 && gameState === 'playing') {
                 shootBullet();
                 let cooldownBase = rapidFire ? 0.07 : Math.max(0.12, 0.28 - player.weaponLevel*0.025);
                 shotCooldown = cooldownBase;
@@ -1127,6 +1222,104 @@ UNLOAD YOUR ARMOR ⚠️`;
         function gameOverToMenu() { backToMenu(); }
         
         // event binding
+
+        // Touch / mouse controls for movement (no d-pad UI)
+        // Maps to the existing keyboard system by manipulating `keysPressed`.
+        const fireBtn = document.getElementById('fireBtn');
+
+
+        function enableDpad(isDown, key){
+            if(!key) return;
+            if(gameState !== "playing") return;
+            if(isDown) keysPressed.add(key);
+            else keysPressed.delete(key);
+        }
+
+        function bindDpadButton(el, key){
+            if(!el || !key) return;
+            const down = (ev)=>{ ev.preventDefault(); enableDpad(true, key); };
+            const up = (ev)=>{ ev.preventDefault(); enableDpad(false, key); };
+
+            el.addEventListener('pointerdown', down);
+            el.addEventListener('pointerup', up);
+            el.addEventListener('pointercancel', up);
+            el.addEventListener('pointerleave', up);
+        }
+
+        // Movement
+        document.querySelectorAll('.dpad-btn[data-key]').forEach(btn=>{
+            bindDpadButton(btn, btn.getAttribute('data-key'));
+        });
+
+        // Fire (Space/Z)
+        if(fireBtn){
+            fireBtn.addEventListener('pointerdown', (ev)=>{ ev.preventDefault(); if(gameState === "playing") { keysPressed.add(' '); keysPressed.add('z'); keysPressed.add('Z'); } });
+            fireBtn.addEventListener('pointerup', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
+            fireBtn.addEventListener('pointercancel', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
+            fireBtn.addEventListener('pointerleave', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
+        }
+
+        // Also allow touch dragging on the left side: touch position relative to center controls left/right,
+        // and if the player has verticalEnabled we use vertical position for up/down.
+        // This complements the D-pad so the whole left-bottom area can move the ship.
+        let dragTouchActive = false;
+        let dragTouchId = null;
+        function handleGamePointerMove(ev){
+            if(gameState !== "playing") return;
+            const rect = canvas.getBoundingClientRect();
+            const x = (ev.clientX - rect.left) * (W / rect.width);
+            const y = (ev.clientY - rect.top) * (H / rect.height);
+
+            const cx = W/2;
+            const dead = 18;
+            if(x < cx - dead) keysPressed.add('ArrowLeft'); else keysPressed.delete('ArrowLeft');
+            if(x > cx + dead) keysPressed.add('ArrowRight'); else keysPressed.delete('ArrowRight');
+
+            if(player.verticalEnabled){
+                const cy = H-170;
+                const vdead = 22;
+                if(y < cy - vdead) keysPressed.add('ArrowUp'); else keysPressed.delete('ArrowUp');
+                if(y > cy + vdead) keysPressed.add('ArrowDown'); else keysPressed.delete('ArrowDown');
+            } else {
+                keysPressed.delete('ArrowUp');
+                keysPressed.delete('ArrowDown');
+            }
+        }
+        canvas.addEventListener('pointerdown', (ev)=>{
+            if(gameState !== "playing") return;
+            // only treat as drag control if touch is in bottom-left region
+            const rect = canvas.getBoundingClientRect();
+            const x = ev.clientX - rect.left;
+            const y = ev.clientY - rect.top;
+            const w = rect.width;
+            const h = rect.height;
+            const bottomLeft = (x < w*0.6 && y > h*0.55);
+            if(!bottomLeft) return;
+            ev.preventDefault();
+            dragTouchActive = true;
+            dragTouchId = ev.pointerId;
+            canvas.setPointerCapture?.(ev.pointerId);
+            handleGamePointerMove(ev);
+        });
+        canvas.addEventListener('pointermove', (ev)=>{
+            if(!dragTouchActive) return;
+            if(ev.pointerId !== dragTouchId) return;
+            ev.preventDefault();
+            handleGamePointerMove(ev);
+        });
+        const stopDrag = (ev)=>{
+            if(!dragTouchActive) return;
+            if(ev.pointerId !== dragTouchId) return;
+            dragTouchActive = false;
+            dragTouchId = null;
+            // release movement keys from drag
+            keysPressed.delete('ArrowLeft');
+            keysPressed.delete('ArrowRight');
+            keysPressed.delete('ArrowUp');
+            keysPressed.delete('ArrowDown');
+        };
+        canvas.addEventListener('pointerup', stopDrag);
+        canvas.addEventListener('pointercancel', stopDrag);
 
         // Pause panel buttons (mouse/touch functional)
         function setPauseSelectionAndActivate(idx){
