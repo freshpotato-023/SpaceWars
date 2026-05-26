@@ -22,6 +22,18 @@
             touch-action: manipulation;
         }
 
+        /* Mobile orientation helper (best-effort): rotate UI to landscape when possible */
+        @media (max-width: 520px) {
+            /* If the device is held in portrait, this will rotate the whole game container */
+            @media (orientation: portrait) {
+                .game-container {
+                    transform: rotate(-90deg);
+                    transform-origin: center;
+                }
+            }
+        }
+
+
         .game-container {
             position: relative;
             box-shadow: 0 0 32px rgba(0, 255, 255, 0.2);
@@ -141,102 +153,57 @@
         }
 
         /* Mobile touch controls */
-        .dpad-controls {
+        .touch-buttons {
             position: absolute;
             left: 18px;
             right: 18px;
             bottom: 12px;
-            height: 120px;
             display: flex;
-            align-items: flex-end;
-            justify-content: center;
-            gap: 16px;
-            z-index: 12;
+            justify-content: space-between;
+            z-index: 16;
             pointer-events: none; /* enable only buttons */
         }
 
-        /* (unused) dpad-side kept for compatibility */
-        .dpad-side {
-            display: flex;
-            gap: 14px;
-            align-items: flex-end;
-            pointer-events: none;
-        }
-
-        .dpad {
-            width: 120px;
-            height: 96px;
-            position: relative;
-            pointer-events: auto;
-        }
-
-        .dpad-btn {
-            position: absolute;
-            width: 60px;
-            height: 60px;
+        .touch-btn {
+            width: 90px;
+            height: 70px;
             border-radius: 18px;
-            border: 1px solid rgba(42, 170, 255, 0.75);
-            background: rgba(10, 25, 55, 0.55);
+            background: rgba(10, 20, 40, 0.45);
+            border: 1px solid rgba(42, 170, 255, 0.8);
+            box-shadow: 0 0 18px rgba(0,255,255,0.12);
             color: #dff;
             font-weight: 900;
-            font-size: 18px;
+            font-size: 26px;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 0 12px rgba(0,255,255,0.12);
-            touch-action: none;
             user-select: none;
-        }
-        .dpad-btn:active { background: rgba(0, 180, 255, 0.18); }
-
-        .dpad-btn.up { left: 50px; top: 14px; }
-        .dpad-btn.down { left: 50px; bottom: 14px; }
-        .dpad-btn.left { left: 14px; top: 50px; }
-        .dpad-btn.right { right: 14px; top: 50px; }
-
-        .firepad {
             pointer-events: auto;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .fire-btn {
-            width: 74px;
-            height: 74px;
-            border-radius: 24px;
-            border: 1px solid rgba(42, 170, 255, 0.85);
-            background: rgba(10, 20, 40, 0.55);
-            color: #fff;
-            font-weight: 900;
-            font-size: 22px;
-            box-shadow: 0 0 18px rgba(0,255,255,0.14);
             touch-action: none;
-            user-select: none;
-            display: flex;
-            align-items: center;
-            justify-content: center;
         }
 
         @media (max-width: 520px) {
-            .dpad-controls { height: 105px; bottom: 8px; }
-            .dpad { width: 140px; height: 105px; }
-            .dpad-btn { width: 48px; height: 48px; border-radius: 14px; }
-            .dpad-btn.up { left: 48px; top: 12px; }
-            .dpad-btn.down { left: 48px; bottom: 12px; }
-            .dpad-btn.left { left: 12px; top: 46px; }
-            .dpad-btn.right { right: 12px; top: 46px; }
-            .fire-btn { width: 70px; height: 70px; border-radius: 22px; }
+            .touch-btn { width: 80px; height: 64px; border-radius: 16px; }
         }
-
-
     </style>
 </head>
 <body>
 <div class="game-container" id="gameContainer">
     <canvas id="gameCanvas" width="900" height="700"></canvas>
     <div id="pauseHint" class="pause-icon">⏸️ P / ESC</div>
+
+    <!-- Mobile pause button (top-right) -->
+    <div id="pauseButtonUI" class="pause-icon" style="top:14px; bottom:auto; right:14px; cursor:pointer; pointer-events:auto; z-index:25;" title="Pause">⏸️</div>
+
+
+    <!-- Bottom touch buttons -->
+    <div id="touchButtons" class="touch-buttons">
+        <div class="touch-btn touch-left" id="touchLeft">◀</div>
+        <div class="touch-btn touch-right" id="touchRight">▶</div>
+    </div>
+
+    
+
 
 
 
@@ -1223,9 +1190,49 @@ UNLOAD YOUR ARMOR ⚠️`;
         
         // event binding
 
-        // Touch / mouse controls for movement (no d-pad UI)
+        // Touch / mouse controls for movement (buttons at bottom)
         // Maps to the existing keyboard system by manipulating `keysPressed`.
-        const fireBtn = document.getElementById('fireBtn');
+        const touchLeftBtn = document.getElementById('touchLeft');
+        const touchRightBtn = document.getElementById('touchRight');
+
+        // Bind bottom buttons to left/right movement
+        if(touchLeftBtn){
+            touchLeftBtn.addEventListener('pointerdown', (ev)=>{
+                ev.preventDefault();
+                if(gameState === 'playing') keysPressed.add('ArrowLeft');
+            });
+            touchLeftBtn.addEventListener('pointerup', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowLeft');
+            });
+            touchLeftBtn.addEventListener('pointercancel', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowLeft');
+            });
+            touchLeftBtn.addEventListener('pointerleave', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowLeft');
+            });
+        }
+
+        if(touchRightBtn){
+            touchRightBtn.addEventListener('pointerdown', (ev)=>{
+                ev.preventDefault();
+                if(gameState === 'playing') keysPressed.add('ArrowRight');
+            });
+            touchRightBtn.addEventListener('pointerup', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowRight');
+            });
+            touchRightBtn.addEventListener('pointercancel', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowRight');
+            });
+            touchRightBtn.addEventListener('pointerleave', (ev)=>{
+                ev.preventDefault();
+                keysPressed.delete('ArrowRight');
+            });
+        }
 
 
         function enableDpad(isDown, key){
@@ -1251,13 +1258,7 @@ UNLOAD YOUR ARMOR ⚠️`;
             bindDpadButton(btn, btn.getAttribute('data-key'));
         });
 
-        // Fire (Space/Z)
-        if(fireBtn){
-            fireBtn.addEventListener('pointerdown', (ev)=>{ ev.preventDefault(); if(gameState === "playing") { keysPressed.add(' '); keysPressed.add('z'); keysPressed.add('Z'); } });
-            fireBtn.addEventListener('pointerup', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
-            fireBtn.addEventListener('pointercancel', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
-            fireBtn.addEventListener('pointerleave', (ev)=>{ ev.preventDefault(); keysPressed.delete(' '); keysPressed.delete('z'); keysPressed.delete('Z'); });
-        }
+
 
         // Also allow touch dragging on the left side: touch position relative to center controls left/right,
         // and if the player has verticalEnabled we use vertical position for up/down.
@@ -1321,8 +1322,25 @@ UNLOAD YOUR ARMOR ⚠️`;
         canvas.addEventListener('pointerup', stopDrag);
         canvas.addEventListener('pointercancel', stopDrag);
 
+        // Mobile pause button (top-right)
+        const pauseButtonUI = document.getElementById('pauseButtonUI');
+        if(pauseButtonUI){
+            pauseButtonUI.addEventListener('pointerdown', (ev)=>{
+                ev.preventDefault();
+                if(gameState === 'playing'){
+                    gameState = 'paused';
+                    pauseMenuIndex = 0;
+                    showPanel('pausePanel');
+                } else if(gameState === 'paused'){
+                    gameState = 'playing';
+                    hidePanels();
+                }
+            });
+        }
+
         // Pause panel buttons (mouse/touch functional)
         function setPauseSelectionAndActivate(idx){
+
             pauseMenuIndex = idx;
             if(gameState !== "paused") return;
             if(pauseMenuIndex===0) backToMenu();
@@ -1335,7 +1353,8 @@ UNLOAD YOUR ARMOR ⚠️`;
 
         window.addEventListener("keydown", (e)=>{
 
-            if(gameState === "playing" && (e.key === "p" || e.key === "Escape")) { gameState="paused"; showPanel("pausePanel"); pauseMenuIndex=0; }
+            if(gameState === "playing" && e.repeat !== true && (e.key === "p" || e.key === "Escape")) { gameState="paused"; showPanel("pausePanel"); pauseMenuIndex=0; }
+
             if(gameState === "paused") {
                 if(e.key === "ArrowUp") pauseMenuIndex = (pauseMenuIndex-1+3)%3;
                 if(e.key === "ArrowDown") pauseMenuIndex = (pauseMenuIndex+1)%3;
