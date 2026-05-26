@@ -22,16 +22,8 @@
             touch-action: manipulation;
         }
 
-        /* Mobile orientation helper (best-effort): rotate UI to landscape when possible */
-        @media (max-width: 520px) {
-            /* If the device is held in portrait, this will rotate the whole game container */
-            @media (orientation: portrait) {
-                .game-container {
-                    transform: rotate(-90deg);
-                    transform-origin: center;
-                }
-            }
-        }
+
+
 
 
         .game-container {
